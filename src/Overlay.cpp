@@ -130,6 +130,7 @@ Overlay::~Overlay() {
     // Uninstall hook if no more overlays
     if (overlayWindows.empty()) {
         uninstallShellHook();
+        uninstallKeyboardHook();
         // uninstallMouseHook(); // Not installed by default anymore
         
         // Uninitialize magnification if all overlays are gone
@@ -416,6 +417,19 @@ void Overlay::uninstallMouseHook() {
     }
 }
 
+void Overlay::installKeyboardHook() {
+    if (!keyboardHook) {
+        keyboardHook = SetWindowsHookEx(WH_KEYBOARD_LL, keyboardHookProc, GetModuleHandle(nullptr), 0);
+    }
+}
+
+void Overlay::uninstallKeyboardHook() {
+    if (keyboardHook) {
+        UnhookWindowsHookEx(keyboardHook);
+        keyboardHook = nullptr;
+    }
+}
+
 LRESULT CALLBACK Overlay::shellHookProc(int nCode, WPARAM wParam, LPARAM lParam) {
     if (nCode >= 0) {
         // Throttle updates to prevent lag
@@ -425,14 +439,7 @@ LRESULT CALLBACK Overlay::shellHookProc(int nCode, WPARAM wParam, LPARAM lParam)
         }
         lastShellHookUpdate = currentTime;
         
-        // Check if Alt+Tab is active by checking for task switcher
-        HWND taskSwitcher = FindWindow(L"TaskSwitcherWnd", nullptr);
-        if (!taskSwitcher) {
-            taskSwitcher = FindWindow(L"MultitaskingViewFrame", nullptr);
-        }
-        altTabActive = (taskSwitcher != nullptr);
-        
-        // Don't interfere during Alt+Tab to prevent leftover artifacts
+        // Better Alt+Tab detection using keyboard hook state
         if (altTabActive) {
             return CallNextHookEx(shellHook, nCode, wParam, lParam);
         }
@@ -509,6 +516,29 @@ LRESULT CALLBACK Overlay::mouseHookProc(int nCode, WPARAM wParam, LPARAM lParam)
     }
     
     return CallNextHookEx(mouseHook, nCode, wParam, lParam);
+}
+
+LRESULT CALLBACK Overlay::keyboardHookProc(int nCode, WPARAM wParam, LPARAM lParam) {
+    if (nCode >= 0) {
+        KBDLLHOOKSTRUCT* keyData = (KBDLLHOOKSTRUCT*)lParam;
+        
+        if (wParam == WM_KEYDOWN || wParam == WM_SYSKEYDOWN) {
+            if (keyData->vkCode == VK_MENU) { // Alt key
+                altKeyPressed = true;
+            }
+            else if (keyData->vkCode == VK_TAB && altKeyPressed) {
+                altTabActive = true;
+            }
+        }
+        else if (wParam == WM_KEYUP || wParam == WM_SYSKEYUP) {
+            if (keyData->vkCode == VK_MENU) { // Alt key released
+                altKeyPressed = false;
+                altTabActive = false; // Alt+Tab sequence ended
+            }
+        }
+    }
+    
+    return CallNextHookEx(keyboardHook, nCode, wParam, lParam);
 }
 
 void Overlay::createMagnificationOverlay() {

@@ -80,9 +80,9 @@ namespace dimmer {
             bool useMagnification;
             
             static HHOOK shellHook;
+            static HHOOK keyboardHook;
             static std::vector<HWND> overlayWindows;
             static HHOOK mouseHook;
-            static HHOOK keyboardHook;
             static void installMouseHook();
             static void uninstallMouseHook();
             static void installKeyboardHook();
