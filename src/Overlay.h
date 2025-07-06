@@ -82,9 +82,13 @@ namespace dimmer {
             static HHOOK shellHook;
             static std::vector<HWND> overlayWindows;
             static HHOOK mouseHook;
+            static HHOOK keyboardHook;
             static void installMouseHook();
             static void uninstallMouseHook();
+            static void installKeyboardHook();
+            static void uninstallKeyboardHook();
             static LRESULT CALLBACK mouseHookProc(int nCode, WPARAM wParam, LPARAM lParam);
+            static LRESULT CALLBACK keyboardHookProc(int nCode, WPARAM wParam, LPARAM lParam);
             static bool magnificationInitialized;
     };
 }

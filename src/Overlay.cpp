@@ -50,7 +50,7 @@ using namespace dimmer;
 #define AGGRESSIVE_TIMER_ID 0xdeadc0de
 
 constexpr int timerTickMs = 10;
-constexpr int aggressiveTimerMs = 5; // More frequent updates for aggressive mode
+constexpr int aggressiveTimerMs = 50; // Reduced frequency to prevent lag
 constexpr wchar_t className[] = L"DimmerOverlayClass";
 constexpr wchar_t windowTitle[] = L"DimmerOverlayWindow";
 constexpr wchar_t magnificationHostClass[] = L"DimmerMagnificationHost";
@@ -64,7 +64,14 @@ static WORD gammaRamp[3][256];
 HHOOK Overlay::shellHook = nullptr;
 std::vector<HWND> Overlay::overlayWindows;
 HHOOK Overlay::mouseHook = nullptr;
+HHOOK Overlay::keyboardHook = nullptr;
 bool Overlay::magnificationInitialized = false;
+
+// Performance optimization: track last update times
+static DWORD lastShellHookUpdate = 0;
+static DWORD lastMouseHookUpdate = 0;
+static bool altTabActive = false;
+static bool altKeyPressed = false;
 
 static void registerClass(HINSTANCE instance, WNDPROC wndProc) {
     if (!overlayClass) {
@@ -101,7 +108,9 @@ Overlay::Overlay(HINSTANCE instance, Monitor monitor)
     registerClass(instance, &Overlay::windowProc);
     this->update(monitor);
     installShellHook();
-    installMouseHook();
+    installKeyboardHook(); // For better Alt+Tab detection
+    // Don't install mouse hook by default - too laggy
+    // installMouseHook();
 }
 
 Overlay::~Overlay() {
@@ -121,7 +130,7 @@ Overlay::~Overlay() {
     // Uninstall hook if no more overlays
     if (overlayWindows.empty()) {
         uninstallShellHook();
-        uninstallMouseHook();
+        // uninstallMouseHook(); // Not installed by default anymore
         
         // Uninitialize magnification if all overlays are gone
         if (magnificationInitialized) {
@@ -211,7 +220,8 @@ void Overlay::updateColorTemperature() {
 
 void Overlay::disableBrigthnessOverlay() {
     this->killTimer();
-    this->destroyMagnificationOverlay();
+    // Don't use magnification overlay by default - causes lag
+    // this->destroyMagnificationOverlay();
     
     if (this->hwnd) {
         // Remove from overlay windows list
@@ -294,7 +304,7 @@ void Overlay::startTimer() {
 
     if (isPollingEnabled()) {
         this->timerId = SetTimer(this->hwnd, TIMER_ID, timerTickMs, nullptr);
-        // Also start aggressive timer for more frequent z-order enforcement
+        // Only start aggressive timer when really needed
         this->aggressiveTimerId = SetTimer(this->hwnd, AGGRESSIVE_TIMER_ID, aggressiveTimerMs, nullptr);
     }
 }
@@ -325,12 +335,17 @@ LRESULT CALLBACK Overlay::windowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
 
             case WM_TIMER: {
                 if (wParam == overlay->second->timerId) {
-                    BringWindowToTop(hwnd);
+                    // Don't interfere during Alt+Tab
+                    if (!altTabActive) {
+                        BringWindowToTop(hwnd);
+                    }
                     return 0;
                 }
                 else if (wParam == overlay->second->aggressiveTimerId) {
-                    // More aggressive z-order enforcement
-                    overlay->second->aggressiveTopMost();
+                    // More aggressive z-order enforcement, but only when needed
+                    if (!altTabActive) {
+                        overlay->second->aggressiveTopMost();
+                    }
                     return 0;
                 }
             }
@@ -351,33 +366,28 @@ void Overlay::aggressiveTopMost() {
     
     // Multiple attempts with different approaches
     SetWindowPos(this->hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOOWNERZORDER);
-    BringWindowToTop(this->hwnd);
-    SetWindowPos(this->hwnd, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
     
-    // Use DWM to ensure window is above composition
-    BOOL compositionEnabled = FALSE;
-    if (SUCCEEDED(DwmIsCompositionEnabled(&compositionEnabled)) && compositionEnabled) {
-        // Force window to be rendered above DWM composition
-        DWMNCRENDERINGPOLICY policy = DWMNCRP_ENABLED;
-        DwmSetWindowAttribute(this->hwnd, DWMWA_NCRENDERING_POLICY, &policy, sizeof(policy));
+    // Don't interfere during Alt+Tab
+    if (altTabActive) return;
+    
+    // Use DWM to ensure window is above composition (but only occasionally)
+    static DWORD lastDwmUpdate = 0;
+    DWORD currentTime = GetTickCount();
+    if (currentTime - lastDwmUpdate > 1000) { // Only update DWM settings once per second
+        lastDwmUpdate = currentTime;
         
-        // Exclude from DWM peek
-        BOOL exclude = TRUE;
-        DwmSetWindowAttribute(this->hwnd, DWMWA_EXCLUDED_FROM_PEEK, &exclude, sizeof(exclude));
-        
-        // Disable DWM transitions
-        BOOL disallow = TRUE;
-        DwmSetWindowAttribute(this->hwnd, DWMWA_DISALLOW_PEEK, &disallow, sizeof(disallow));
+        BOOL compositionEnabled = FALSE;
+        if (SUCCEEDED(DwmIsCompositionEnabled(&compositionEnabled)) && compositionEnabled) {
+            // Exclude from DWM peek
+            BOOL exclude = TRUE;
+            DwmSetWindowAttribute(this->hwnd, DWMWA_EXCLUDED_FROM_PEEK, &exclude, sizeof(exclude));
+        }
     }
     
-    // Force redraw to ensure visibility
-    InvalidateRect(this->hwnd, nullptr, FALSE);
-    UpdateWindow(this->hwnd);
-    
-    // Try magnification overlay if traditional overlay fails
-    if (magnificationInitialized) {
-        this->createMagnificationOverlay();
-    }
+    // Only try magnification overlay as fallback if really needed
+    // if (magnificationInitialized) {
+    //     this->createMagnificationOverlay();
+    // }
 }
 
 void Overlay::installShellHook() {
@@ -408,46 +418,49 @@ void Overlay::uninstallMouseHook() {
 
 LRESULT CALLBACK Overlay::shellHookProc(int nCode, WPARAM wParam, LPARAM lParam) {
     if (nCode >= 0) {
+        // Throttle updates to prevent lag
+        DWORD currentTime = GetTickCount();
+        if (currentTime - lastShellHookUpdate < 100) { // Limit to 10 updates per second
+            return CallNextHookEx(shellHook, nCode, wParam, lParam);
+        }
+        lastShellHookUpdate = currentTime;
+        
+        // Check if Alt+Tab is active by checking for task switcher
+        HWND taskSwitcher = FindWindow(L"TaskSwitcherWnd", nullptr);
+        if (!taskSwitcher) {
+            taskSwitcher = FindWindow(L"MultitaskingViewFrame", nullptr);
+        }
+        altTabActive = (taskSwitcher != nullptr);
+        
+        // Don't interfere during Alt+Tab to prevent leftover artifacts
+        if (altTabActive) {
+            return CallNextHookEx(shellHook, nCode, wParam, lParam);
+        }
+        
         switch (wParam) {
             case HSHELL_WINDOWCREATED:
-            case HSHELL_WINDOWACTIVATED:
-            case HSHELL_REDRAW: {
-                // Force all overlay windows to top when system creates/activates windows
-                for (HWND overlayHwnd : overlayWindows) {
-                    if (IsWindow(overlayHwnd)) {
-                        SetWindowPos(overlayHwnd, HWND_TOPMOST, 0, 0, 0, 0, 
-                                   SWP_NOMOVE | SWP_NOSIZE | SWP_NOOWNERZORDER | SWP_NOACTIVATE);
-                        SetWindowPos(overlayHwnd, HWND_TOP, 0, 0, 0, 0, 
-                                   SWP_NOMOVE | SWP_NOSIZE | SWP_NOOWNERZORDER | SWP_NOACTIVATE);
-                    }
-                }
+            case HSHELL_WINDOWACTIVATED: {
+                HWND newWindow = (HWND)lParam;
                 
-                // Additional aggressive approach: enumerate all windows and force overlays above them
-                EnumWindows([](HWND hwnd, LPARAM lParam) -> BOOL {
-                    wchar_t className[256];
-                    GetClassName(hwnd, className, sizeof(className) / sizeof(wchar_t));
-                    
-                    // Check for special window classes that might be system UI
+                // Check if it's a special window that needs overlay enforcement
+                wchar_t className[256];
+                if (GetClassName(newWindow, className, sizeof(className) / sizeof(wchar_t))) {
                     std::wstring classStr(className);
+                    
+                    // Only handle specific problematic window types
                     if (classStr.find(L"TaskListThumbnailWnd") != std::wstring::npos ||
-                        classStr.find(L"Chrome") != std::wstring::npos ||
-                        classStr.find(L"Thumbnail") != std::wstring::npos ||
-                        classStr.find(L"Preview") != std::wstring::npos ||
-                        classStr.find(L"Popup") != std::wstring::npos) {
+                        classStr.find(L"Chrome_RenderWidgetHostHWND") != std::wstring::npos ||
+                        classStr.find(L"Chrome_WidgetWin") != std::wstring::npos) {
                         
-                        // Force overlays above these special windows
+                        // Efficiently bring overlays to front
                         for (HWND overlayHwnd : overlayWindows) {
                             if (IsWindow(overlayHwnd)) {
-                                SetWindowPos(overlayHwnd, hwnd, 0, 0, 0, 0, 
-                                           SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
                                 SetWindowPos(overlayHwnd, HWND_TOPMOST, 0, 0, 0, 0, 
-                                           SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+                                           SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
                             }
                         }
                     }
-                    return TRUE;
-                }, 0);
-                
+                }
                 break;
             }
         }
@@ -458,28 +471,37 @@ LRESULT CALLBACK Overlay::shellHookProc(int nCode, WPARAM wParam, LPARAM lParam)
 
 LRESULT CALLBACK Overlay::mouseHookProc(int nCode, WPARAM wParam, LPARAM lParam) {
     if (nCode >= 0) {
-        MSLLHOOKSTRUCT* mouseData = (MSLLHOOKSTRUCT*)lParam;
+        // Throttle mouse hook updates heavily to prevent lag
+        DWORD currentTime = GetTickCount();
+        if (currentTime - lastMouseHookUpdate < 500) { // Limit to 2 updates per second
+            return CallNextHookEx(mouseHook, nCode, wParam, lParam);
+        }
+        lastMouseHookUpdate = currentTime;
         
-        // Get taskbar position
-        HWND taskbar = FindWindow(L"Shell_TrayWnd", nullptr);
-        if (taskbar) {
-            RECT taskbarRect;
-            GetWindowRect(taskbar, &taskbarRect);
+        // Don't interfere during Alt+Tab
+        if (altTabActive) {
+            return CallNextHookEx(mouseHook, nCode, wParam, lParam);
+        }
+        
+        // Only handle mouse move events to detect taskbar hover
+        if (wParam == WM_MOUSEMOVE) {
+            MSLLHOOKSTRUCT* mouseData = (MSLLHOOKSTRUCT*)lParam;
             
-            // Check if mouse is over taskbar area
-            POINT mousePos = mouseData->pt;
-            if (PtInRect(&taskbarRect, mousePos)) {
-                // Mouse is over taskbar, aggressively bring overlays to front
-                for (HWND overlayHwnd : overlayWindows) {
-                    if (IsWindow(overlayHwnd)) {
-                        SetWindowPos(overlayHwnd, HWND_TOPMOST, 0, 0, 0, 0, 
-                                   SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
-                        SetWindowPos(overlayHwnd, HWND_TOP, 0, 0, 0, 0, 
-                                   SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
-                        
-                        // Additional forced redraw
-                        InvalidateRect(overlayHwnd, nullptr, FALSE);
-                        UpdateWindow(overlayHwnd);
+            // Get taskbar position
+            HWND taskbar = FindWindow(L"Shell_TrayWnd", nullptr);
+            if (taskbar) {
+                RECT taskbarRect;
+                GetWindowRect(taskbar, &taskbarRect);
+                
+                // Check if mouse is over taskbar area
+                POINT mousePos = mouseData->pt;
+                if (PtInRect(&taskbarRect, mousePos)) {
+                    // Mouse is over taskbar, efficiently bring overlays to front
+                    for (HWND overlayHwnd : overlayWindows) {
+                        if (IsWindow(overlayHwnd)) {
+                            SetWindowPos(overlayHwnd, HWND_TOPMOST, 0, 0, 0, 0, 
+                                       SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
+                        }
                     }
                 }
             }
