@@ -92,6 +92,8 @@ int CALLBACK wWinMain(HINSTANCE instance, HINSTANCE prev, LPWSTR args, int showT
             }
             else {
                 overlay.second->startTimer();
+                // Force overlays to top when popup menu closes
+                overlay.second->forceToTop();
             }
         }
     });

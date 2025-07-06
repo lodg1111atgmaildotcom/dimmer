@@ -35,6 +35,7 @@
 #pragma once
 
 #include <Windows.h>
+#include <magnification.h>
 #include "Monitor.h"
 
 namespace dimmer {
@@ -46,19 +47,44 @@ namespace dimmer {
             void update(Monitor& monitor);
             void startTimer();
             void killTimer();
+            void forceToTop();
 
         private:
             static LRESULT CALLBACK windowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
+            static LRESULT CALLBACK shellHookProc(int nCode, WPARAM wParam, LPARAM lParam);
+            static void installShellHook();
+            static void uninstallShellHook();
 
             void disableColorTemperature();
             void updateColorTemperature();
             void disableBrigthnessOverlay();
             void updateBrightnessOverlay();
+            void aggressiveTopMost();
+            
+            // Magnification API methods
+            void createMagnificationOverlay();
+            void destroyMagnificationOverlay();
+            void updateMagnificationOverlay();
+            static BOOL CALLBACK magnificationHostWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam, UINT_PTR uIdSubclass, DWORD_PTR dwRefData);
 
             Monitor monitor;
             HINSTANCE instance;
             HBRUSH bgBrush;
             UINT_PTR timerId;
+            UINT_PTR aggressiveTimerId;
             HWND hwnd;
+            
+            // Magnification overlay
+            HWND magnificationHost;
+            HWND magnificationControl;
+            bool useMagnification;
+            
+            static HHOOK shellHook;
+            static std::vector<HWND> overlayWindows;
+            static HHOOK mouseHook;
+            static void installMouseHook();
+            static void uninstallMouseHook();
+            static LRESULT CALLBACK mouseHookProc(int nCode, WPARAM wParam, LPARAM lParam);
+            static bool magnificationInitialized;
     };
 }
